@@ -1,81 +1,50 @@
-import SwiftUI
-import Charts
+import XCTest
+@testable import MiniWallet
 
-extension ExpenseCategory {
-    var title: String { rawValue.capitalized }
-}
-
-struct ExpensesView: View {
-    @State private var viewModel: ExpensesViewModel
-
-    init(viewModel: ExpensesViewModel) {
-        _viewModel = State(initialValue: viewModel)
+@MainActor
+final class ExpensesViewModelTests: XCTestCase {
+    private var calendar: Calendar {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = TimeZone(identifier: "UTC")!
+        return c
     }
 
-    var body: some View {
-        List {
-            Section {
-                HStack {
-                    Button { Task { await viewModel.showPreviousMonth() } } label: {
-                        Image(systemName: "chevron.left")
-                    }
-                    Spacer()
-                    Text(viewModel.month.formatted(.dateTime.month(.wide).year()))
-                        .font(.headline)
-                    Spacer()
-                    Button { Task { await viewModel.showNextMonth() } } label: {
-                        Image(systemName: "chevron.right")
-                    }
-                    .disabled(!viewModel.canGoForward)
-                }
-                .buttonStyle(.borderless)
-            }
-
-            if let message = viewModel.errorMessage {
-                Section { Text(message).foregroundStyle(.red) }
-            }
-
-            if viewModel.slices.isEmpty {
-                ContentUnavailableView("No spending this month",
-                                       systemImage: "chart.pie")
-            } else {
-                Section("Total spent") {
-                    Text(display(viewModel.total))
-                        .font(.title.bold())
-                    Chart(viewModel.slices) { slice in
-                        // Double is used only to draw the chart, never for totals.
-                        SectorMark(angle: .value("Amount", Double(slice.amount.minorUnits)),
-                                   innerRadius: .ratio(0.6), angularInset: 2)
-                            .foregroundStyle(by: .value("Category", slice.category.title))
-                    }
-                    .frame(height: 220)
-                }
-                Section("By category") {
-                    ForEach(viewModel.slices) { slice in
-                        HStack {
-                            Text(slice.category.title)
-                            Spacer()
-                            Text(display(slice.amount)).monospacedDigit()
-                        }
-                    }
-                }
-            }
-        }
-        .navigationTitle("Expenses")
-        .task { await viewModel.load() }
+    private func date(_ y: Int, _ m: Int, _ d: Int) -> Date {
+        calendar.date(from: DateComponents(year: y, month: m, day: d, hour: 12))!
     }
 
-    private func display(_ money: Money) -> String {
-        (Decimal(money.minorUnits) / 100).formatted(.currency(code: money.currencyCode))
+    private func makeViewModel(_ items: [Expense], month: Date) -> ExpensesViewModel {
+        let useCase = GetMonthlySummaryUseCase(
+            repository: InMemoryExpenseRepository(items: items), calendar: calendar)
+        return ExpensesViewModel(useCase: useCase, month: month, calendar: calendar)
     }
-}
 
-#Preview {
-    let items = [
-        Expense(amount: Money(minorUnits: 47_000), category: .food, date: .now),
-        Expense(amount: Money(minorUnits: 100_000), category: .transport, date: .now),
-        Expense(amount: Money(minorUnits: 14_000), category: .other, date: .now)
-    ]
-    let useCase = GetMonthlySummaryUseCase(repository: InMemoryExpenseRepository(items: items))
-    NavigationStack { ExpensesView(viewModel: ExpensesViewModel(useCase: useCase)) }
+    func test_load_sortsSlicesByAmountDescending() async {
+        let vm = makeViewModel([
+            Expense(amount: Money(minorUnits: 100), category: .food, date: date(2026, 9, 3)),
+            Expense(amount: Money(minorUnits: 900), category: .bills, date: date(2026, 9, 4)),
+            Expense(amount: Money(minorUnits: 500), category: .transport, date: date(2026, 9, 5))
+        ], month: date(2026, 9, 10))
+        await vm.load()
+        XCTAssertEqual(vm.slices.map(\.category), [.bills, .transport, .food])
+        XCTAssertEqual(vm.total, Money(minorUnits: 1_500))
+    }
+
+    func test_showPreviousMonth_reloadsForThatMonth() async {
+        let vm = makeViewModel([
+            Expense(amount: Money(minorUnits: 300), category: .food, date: date(2026, 9, 3)),
+            Expense(amount: Money(minorUnits: 700), category: .food, date: date(2026, 8, 20))
+        ], month: date(2026, 9, 10))
+        await vm.load()
+        XCTAssertEqual(vm.total, Money(minorUnits: 300))
+        await vm.showPreviousMonth()
+        XCTAssertEqual(vm.total, Money(minorUnits: 700))
+    }
+
+    func test_emptyMonth_hasNoSlices() async {
+        let vm = makeViewModel([], month: date(2026, 9, 10))
+        await vm.load()
+        XCTAssertTrue(vm.slices.isEmpty)
+        XCTAssertEqual(vm.total, .zero)
+    }
 }
