@@ -1,52 +1,81 @@
-import Foundation
-import Observation
+import SwiftUI
+import Charts
 
-@MainActor
-@Observable
-final class ExpensesViewModel {
-    struct Slice: Identifiable, Equatable {
-        let category: ExpenseCategory
-        let amount: Money
-        var id: ExpenseCategory { category }
+extension ExpenseCategory {
+    var title: String { rawValue.capitalized }
+}
+
+struct ExpensesView: View {
+    @State private var viewModel: ExpensesViewModel
+
+    init(viewModel: ExpensesViewModel) {
+        _viewModel = State(initialValue: viewModel)
     }
 
-    private(set) var month: Date
-    private(set) var slices: [Slice] = []
-    private(set) var total: Money = .zero
-    private(set) var errorMessage: String?
+    var body: some View {
+        List {
+            Section {
+                HStack {
+                    Button { Task { await viewModel.showPreviousMonth() } } label: {
+                        Image(systemName: "chevron.left")
+                    }
+                    Spacer()
+                    Text(viewModel.month.formatted(.dateTime.month(.wide).year()))
+                        .font(.headline)
+                    Spacer()
+                    Button { Task { await viewModel.showNextMonth() } } label: {
+                        Image(systemName: "chevron.right")
+                    }
+                    .disabled(!viewModel.canGoForward)
+                }
+                .buttonStyle(.borderless)
+            }
 
-    private let useCase: GetMonthlySummaryUseCase
-    private let calendar: Calendar
+            if let message = viewModel.errorMessage {
+                Section { Text(message).foregroundStyle(.red) }
+            }
 
-    init(useCase: GetMonthlySummaryUseCase, month: Date = .now, calendar: Calendar = .current) {
-        self.useCase = useCase
-        self.month = month
-        self.calendar = calendar
-    }
-
-    var canGoForward: Bool {
-        !calendar.isDate(month, equalTo: .now, toGranularity: .month)
-    }
-
-    func load() async {
-        do {
-            let summary = try await useCase.execute(month: month)
-            total = summary.total
-            slices = summary.byCategory
-                .map { Slice(category: $0.key, amount: $0.value) }
-                .sorted { $0.amount.minorUnits > $1.amount.minorUnits }
-            errorMessage = nil
-        } catch {
-            errorMessage = "Couldn't load your spending. Please try again."
+            if viewModel.slices.isEmpty {
+                ContentUnavailableView("No spending this month",
+                                       systemImage: "chart.pie")
+            } else {
+                Section("Total spent") {
+                    Text(display(viewModel.total))
+                        .font(.title.bold())
+                    Chart(viewModel.slices) { slice in
+                        // Double is used only to draw the chart, never for totals.
+                        SectorMark(angle: .value("Amount", Double(slice.amount.minorUnits)),
+                                   innerRadius: .ratio(0.6), angularInset: 2)
+                            .foregroundStyle(by: .value("Category", slice.category.title))
+                    }
+                    .frame(height: 220)
+                }
+                Section("By category") {
+                    ForEach(viewModel.slices) { slice in
+                        HStack {
+                            Text(slice.category.title)
+                            Spacer()
+                            Text(display(slice.amount)).monospacedDigit()
+                        }
+                    }
+                }
+            }
         }
+        .navigationTitle("Expenses")
+        .task { await viewModel.load() }
     }
 
-    func showPreviousMonth() async { await shift(by: -1) }
-    func showNextMonth() async { if canGoForward { await shift(by: 1) } }
-
-    private func shift(by months: Int) async {
-        guard let next = calendar.date(byAdding: .month, value: months, to: month) else { return }
-        month = next
-        await load()
+    private func display(_ money: Money) -> String {
+        (Decimal(money.minorUnits) / 100).formatted(.currency(code: money.currencyCode))
     }
+}
+
+#Preview {
+    let items = [
+        Expense(amount: Money(minorUnits: 47_000), category: .food, date: .now),
+        Expense(amount: Money(minorUnits: 100_000), category: .transport, date: .now),
+        Expense(amount: Money(minorUnits: 14_000), category: .other, date: .now)
+    ]
+    let useCase = GetMonthlySummaryUseCase(repository: InMemoryExpenseRepository(items: items))
+    NavigationStack { ExpensesView(viewModel: ExpensesViewModel(useCase: useCase)) }
 }
