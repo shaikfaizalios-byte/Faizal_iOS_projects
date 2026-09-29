@@ -1,39 +1,52 @@
-import XCTest
-@testable import MiniWallet
+import Foundation
+import Observation
 
-final class TransactionExpenseTests: XCTestCase {
-    private let day = Date(timeIntervalSince1970: 1_790_000_000)
-
-    private func tx(_ id: String, _ paise: Int, _ direction: Transaction.Direction,
-                    _ status: Transaction.Status, _ category: ExpenseCategory? = nil) -> Transaction {
-        Transaction(id: id, counterparty: "X", amount: Money(minorUnits: paise),
-                    direction: direction, status: status, occurredAt: day,
-                    note: nil, category: category)
+@MainActor
+@Observable
+final class ExpensesViewModel {
+    struct Slice: Identifiable, Equatable {
+        let category: ExpenseCategory
+        let amount: Money
+        var id: ExpenseCategory { category }
     }
 
-    func test_onlyCompletedDebitsCountAsExpenses() {
-        XCTAssertNotNil(tx("1", 100, .debit, .completed).asExpense)
-        XCTAssertNil(tx("2", 100, .credit, .completed).asExpense)
-        XCTAssertNil(tx("3", 100, .debit, .pending).asExpense)
-        XCTAssertNil(tx("4", 100, .debit, .failed).asExpense)
-        XCTAssertNil(tx("5", 100, .debit, .reversed).asExpense)
+    private(set) var month: Date
+    private(set) var slices: [Slice] = []
+    private(set) var total: Money = .zero
+    private(set) var errorMessage: String?
+
+    private let useCase: GetMonthlySummaryUseCase
+    private let calendar: Calendar
+
+    init(useCase: GetMonthlySummaryUseCase, month: Date = .now, calendar: Calendar = .current) {
+        self.useCase = useCase
+        self.month = month
+        self.calendar = calendar
     }
 
-    func test_uncategorisedDebitFallsBackToOther() {
-        XCTAssertEqual(tx("1", 100, .debit, .completed).asExpense?.category, .other)
-        XCTAssertEqual(tx("2", 100, .debit, .completed, .food).asExpense?.category, .food)
+    var canGoForward: Bool {
+        !calendar.isDate(month, equalTo: .now, toGranularity: .month)
     }
 
-    func test_summaryFromTransactions_ignoresCreditsAndPending() async throws {
-        let all = [
-            tx("1", 47_000, .debit, .completed, .food),
-            tx("2", 1_250_000, .credit, .completed),
-            tx("3", 89_900, .debit, .pending, .bills)
-        ]
-        let repo = TransactionExpenseRepository { all }
-        let useCase = GetMonthlySummaryUseCase(repository: repo)
-        let summary = try await useCase.execute(month: day)
-        XCTAssertEqual(summary.total, Money(minorUnits: 47_000))
-        XCTAssertEqual(summary.byCategory[.food], Money(minorUnits: 47_000))
+    func load() async {
+        do {
+            let summary = try await useCase.execute(month: month)
+            total = summary.total
+            slices = summary.byCategory
+                .map { Slice(category: $0.key, amount: $0.value) }
+                .sorted { $0.amount.minorUnits > $1.amount.minorUnits }
+            errorMessage = nil
+        } catch {
+            errorMessage = "Couldn't load your spending. Please try again."
+        }
+    }
+
+    func showPreviousMonth() async { await shift(by: -1) }
+    func showNextMonth() async { if canGoForward { await shift(by: 1) } }
+
+    private func shift(by months: Int) async {
+        guard let next = calendar.date(byAdding: .month, value: months, to: month) else { return }
+        month = next
+        await load()
     }
 }
