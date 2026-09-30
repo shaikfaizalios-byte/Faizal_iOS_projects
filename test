@@ -1,50 +1,29 @@
-import XCTest
-@testable import MiniWallet
-
-@MainActor
-final class ExpensesViewModelTests: XCTestCase {
-    private var calendar: Calendar {
-        var c = Calendar(identifier: .gregorian)
-        c.timeZone = TimeZone(identifier: "UTC")!
-        return c
+final class PinnedClientTests: XCTestCase {
+    private struct RateLimit: Decodable { let resources: Resources
+        struct Resources: Decodable { let core: Core }
+        struct Core: Decodable { let limit: Int }
     }
 
-    private func date(_ y: Int, _ m: Int, _ d: Int) -> Date {
-        calendar.date(from: DateComponents(year: y, month: m, day: d, hour: 12))!
+    func test_pinnedClient_succeedsWithCorrectPins() async throws {
+        let client = APIClient.pinned(
+            baseURL: URL(string: "https://api.github.com")!,
+            pins: ["api.github.com": ["PASTE_LEAF_PIN=", "PASTE_INTERMEDIATE_PIN="]])
+        do {
+            let result = try await client.get("rate_limit", as: RateLimit.self)
+            XCTAssertGreaterThan(result.resources.core.limit, 0)
+        } catch APIError.transport(let detail) where detail.lowercased().contains("offline") {
+            throw XCTSkip("Offline")
+        }
     }
 
-    private func makeViewModel(_ items: [Expense], month: Date) -> ExpensesViewModel {
-        let useCase = GetMonthlySummaryUseCase(
-            repository: InMemoryExpenseRepository(items: items), calendar: calendar)
-        return ExpensesViewModel(useCase: useCase, month: month, calendar: calendar)
-    }
-
-    func test_load_sortsSlicesByAmountDescending() async {
-        let vm = makeViewModel([
-            Expense(amount: Money(minorUnits: 100), category: .food, date: date(2026, 9, 3)),
-            Expense(amount: Money(minorUnits: 900), category: .bills, date: date(2026, 9, 4)),
-            Expense(amount: Money(minorUnits: 500), category: .transport, date: date(2026, 9, 5))
-        ], month: date(2026, 9, 10))
-        await vm.load()
-        XCTAssertEqual(vm.slices.map(\.category), [.bills, .transport, .food])
-        XCTAssertEqual(vm.total, Money(minorUnits: 1_500))
-    }
-
-    func test_showPreviousMonth_reloadsForThatMonth() async {
-        let vm = makeViewModel([
-            Expense(amount: Money(minorUnits: 300), category: .food, date: date(2026, 9, 3)),
-            Expense(amount: Money(minorUnits: 700), category: .food, date: date(2026, 8, 20))
-        ], month: date(2026, 9, 10))
-        await vm.load()
-        XCTAssertEqual(vm.total, Money(minorUnits: 300))
-        await vm.showPreviousMonth()
-        XCTAssertEqual(vm.total, Money(minorUnits: 700))
-    }
-
-    func test_emptyMonth_hasNoSlices() async {
-        let vm = makeViewModel([], month: date(2026, 9, 10))
-        await vm.load()
-        XCTAssertTrue(vm.slices.isEmpty)
-        XCTAssertEqual(vm.total, .zero)
+    func test_pinnedClient_failsWithWrongPin() async {
+        let client = APIClient.pinned(
+            baseURL: URL(string: "https://api.github.com")!,
+            pins: ["api.github.com": ["AAAA-wrong="]])
+        do {
+            _ = try await client.get("rate_limit", as: RateLimit.self)
+            XCTFail("Pin mismatch should block the request")
+        } catch APIError.transport { /* expected */ }
+        catch { XCTFail("Unexpected error: \(error)") }
     }
 }
